@@ -31,9 +31,13 @@ func (s *stepSetupNetworking) Run(_ context.Context, state multistep.StateBag) m
 		return multistep.ActionContinue
 	}
 
-	// Generate a random public port used to configure our port forward.
-	rand.Seed(time.Now().UnixNano())
-	s.publicPort = 50000 + rand.Intn(10000)
+	if config.PublicPort != 0 {
+		s.publicPort = config.PublicPort
+	} else {
+		// Generate a random public port used to configure our port forward.
+		rand.Seed(time.Now().UnixNano())
+		s.publicPort = 50000 + rand.Intn(10000)
+	}
 	state.Put("commPort", s.publicPort)
 
 	// Set the currently configured port to be the private port.
@@ -116,6 +120,11 @@ func (s *stepSetupNetworking) Run(_ context.Context, state multistep.StateBag) m
 
 	// Store the port forward ID.
 	state.Put("port_forward_id", forward.Id)
+
+	if config.PreventFirewallChanges {
+		ui.Message("Networking has been setup (without firewall changes)!")
+		return multistep.ActionContinue
+	}
 
 	if network.Vpcid != "" {
 		ui.Message("Creating network ACL rule...")

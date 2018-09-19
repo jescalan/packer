@@ -47,7 +47,7 @@ const (
 	//  -> ^[^_\W][\w-._]{0,79}(?<![-.])$
 	//
 	// This is not an exhaustive match, but it should be extremely close.
-	validResourceGroupNameRe = "^[^_\\W][\\w-._\\(\\)]{0,63}$"
+	validResourceGroupNameRe = "^[^_\\W][\\w-._\\(\\)]{0,89}$"
 	validManagedDiskName     = "^[^_\\W][\\w-._)]{0,79}$"
 )
 
@@ -144,13 +144,15 @@ type Config struct {
 
 	// Authentication with the VM via SSH
 	sshAuthorizedKey string
-	sshPrivateKey    string
 
 	// Authentication with the VM via WinRM
 	winrmCertificate string
 
 	Comm communicator.Config `mapstructure:",squash"`
-	ctx  *interpolate.Context
+	ctx  interpolate.Context
+
+	//Cleanup
+	AsyncResourceGroupDelete bool `mapstructure:"async_resourcegroup_delete"`
 }
 
 type keyVaultCertificate struct {
@@ -255,10 +257,10 @@ func (c *Config) createCertificate() (string, error) {
 
 func newConfig(raws ...interface{}) (*Config, []string, error) {
 	var c Config
-
+	c.ctx.Funcs = TemplateFuncs
 	err := config.Decode(&c, &config.DecodeOpts{
 		Interpolate:        true,
-		InterpolateContext: c.ctx,
+		InterpolateContext: &c.ctx,
 	}, raws...)
 
 	if err != nil {
@@ -296,7 +298,7 @@ func newConfig(raws ...interface{}) (*Config, []string, error) {
 	}
 
 	var errs *packer.MultiError
-	errs = packer.MultiErrorAppend(errs, c.Comm.Prepare(c.ctx)...)
+	errs = packer.MultiErrorAppend(errs, c.Comm.Prepare(&c.ctx)...)
 
 	assertRequiredParametersSet(&c, errs)
 	assertTagProperties(&c, errs)
@@ -312,8 +314,8 @@ func setSshValues(c *Config) error {
 		c.Comm.SSHTimeout = 20 * time.Minute
 	}
 
-	if c.Comm.SSHPrivateKey != "" {
-		privateKeyBytes, err := ioutil.ReadFile(c.Comm.SSHPrivateKey)
+	if c.Comm.SSHPrivateKeyFile != "" {
+		privateKeyBytes, err := ioutil.ReadFile(c.Comm.SSHPrivateKeyFile)
 		if err != nil {
 			return err
 		}
@@ -327,7 +329,7 @@ func setSshValues(c *Config) error {
 			publicKey.Type(),
 			base64.StdEncoding.EncodeToString(publicKey.Marshal()),
 			time.Now().Format(time.RFC3339))
-		c.sshPrivateKey = string(privateKeyBytes)
+		c.Comm.SSHPrivateKey = privateKeyBytes
 
 	} else {
 		sshKeyPair, err := NewOpenSshKeyPair()
@@ -336,7 +338,7 @@ func setSshValues(c *Config) error {
 		}
 
 		c.sshAuthorizedKey = sshKeyPair.AuthorizedKey()
-		c.sshPrivateKey = sshKeyPair.PrivateKey()
+		c.Comm.SSHPrivateKey = sshKeyPair.PrivateKey()
 	}
 
 	return nil
@@ -360,6 +362,7 @@ func setRuntimeValues(c *Config) {
 	c.tmpAdminPassword = tempName.AdminPassword
 	// store so that we can access this later during provisioning
 	commonhelper.SetSharedState("winrm_password", c.tmpAdminPassword, c.PackerConfig.PackerBuildName)
+	packer.LogSecretFilter.Set(c.tmpAdminPassword)
 
 	c.tmpCertificatePassword = tempName.CertificatePassword
 	if c.TempComputeName == "" {
@@ -472,7 +475,7 @@ func assertTagProperties(c *Config, errs *packer.MultiError) {
 			errs = packer.MultiErrorAppend(errs, fmt.Errorf("the tag name %q exceeds (%d) the 512 character limit", k, len(k)))
 		}
 		if len(*v) > 256 {
-			errs = packer.MultiErrorAppend(errs, fmt.Errorf("the tag name %q exceeds (%d) the 256 character limit", v, len(*v)))
+			errs = packer.MultiErrorAppend(errs, fmt.Errorf("the tag name %q exceeds (%d) the 256 character limit", *v, len(*v)))
 		}
 	}
 }
@@ -490,9 +493,6 @@ func assertRequiredParametersSet(c *Config, errs *packer.MultiError) {
 	// readable by the ObjectID of the App.  There may be another way to handle
 	// this case, but I am not currently aware of it - send feedback.
 	isUseDeviceLogin := func(c *Config) bool {
-		if c.OSType == constants.Target_Windows {
-			return false
-		}
 
 		return c.SubscriptionID != "" &&
 			c.ClientID == "" &&

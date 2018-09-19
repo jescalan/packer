@@ -7,6 +7,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/service/ec2"
 	awscommon "github.com/hashicorp/packer/builder/amazon/common"
+	"github.com/hashicorp/packer/common/random"
 	"github.com/hashicorp/packer/helper/multistep"
 	"github.com/hashicorp/packer/packer"
 )
@@ -15,17 +16,24 @@ type stepCreateAMI struct {
 	image *ec2.Image
 }
 
-func (s *stepCreateAMI) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
+func (s *stepCreateAMI) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	config := state.Get("config").(Config)
 	ec2conn := state.Get("ec2").(*ec2.EC2)
 	instance := state.Get("instance").(*ec2.Instance)
 	ui := state.Get("ui").(packer.Ui)
 
 	// Create the image
-	ui.Say(fmt.Sprintf("Creating the AMI: %s", config.AMIName))
+	amiName := config.AMIName
+	if config.AMIEncryptBootVolume {
+		// to avoid having a temporary unencrypted
+		// image named config.AMIName
+		amiName = random.AlphaNum(7)
+	}
+
+	ui.Say(fmt.Sprintf("Creating unencrypted AMI %s from instance %s", amiName, *instance.InstanceId))
 	createOpts := &ec2.CreateImageInput{
 		InstanceId:          instance.InstanceId,
-		Name:                &config.AMIName,
+		Name:                &amiName,
 		BlockDeviceMappings: config.BlockDevices.BuildAMIDevices(),
 	}
 
@@ -44,15 +52,8 @@ func (s *stepCreateAMI) Run(_ context.Context, state multistep.StateBag) multist
 	state.Put("amis", amis)
 
 	// Wait for the image to become ready
-	stateChange := awscommon.StateChangeConf{
-		Pending:   []string{"pending"},
-		Target:    "available",
-		Refresh:   awscommon.AMIStateRefreshFunc(ec2conn, *createResp.ImageId),
-		StepState: state,
-	}
-
 	ui.Say("Waiting for AMI to become ready...")
-	if _, err := awscommon.WaitForState(&stateChange); err != nil {
+	if err := awscommon.WaitUntilAMIAvailable(ctx, ec2conn, *createResp.ImageId); err != nil {
 		log.Printf("Error waiting for AMI: %s", err)
 		imagesResp, err := ec2conn.DescribeImages(&ec2.DescribeImagesInput{ImageIds: []*string{createResp.ImageId}})
 		if err != nil {

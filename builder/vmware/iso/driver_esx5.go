@@ -15,9 +15,9 @@ import (
 	"time"
 
 	vmwcommon "github.com/hashicorp/packer/builder/vmware/common"
-	commonssh "github.com/hashicorp/packer/common/ssh"
 	"github.com/hashicorp/packer/communicator/ssh"
 	"github.com/hashicorp/packer/helper/multistep"
+	helperssh "github.com/hashicorp/packer/helper/ssh"
 	"github.com/hashicorp/packer/packer"
 	gossh "golang.org/x/crypto/ssh"
 )
@@ -31,7 +31,7 @@ type ESX5Driver struct {
 	Port           uint
 	Username       string
 	Password       string
-	PrivateKey     string
+	PrivateKeyFile string
 	Datastore      string
 	CacheDatastore string
 	CacheDirectory string
@@ -41,12 +41,13 @@ type ESX5Driver struct {
 	vmId      string
 }
 
-func (d *ESX5Driver) Clone(dst, src string) error {
+func (d *ESX5Driver) Clone(dst, src string, linked bool) error {
 	return errors.New("Cloning is not supported with the ESX driver.")
 }
 
 func (d *ESX5Driver) CompactDisk(diskPathLocal string) error {
-	return nil
+	diskPath := d.datastorePath(diskPathLocal)
+	return d.sh("vmkfstools", "--punchzero", diskPath)
 }
 
 func (d *ESX5Driver) CreateDisk(diskPathLocal string, size string, adapter_type string, typeId string) error {
@@ -389,7 +390,13 @@ func (d *ESX5Driver) CommHost(state multistep.StateBag) (string, error) {
 		return "", err
 	}
 
-	record, err := r.find("Name", config.VMName)
+	// The value in the Name field returned by 'esxcli network vm list'
+	// corresponds directly to the value of displayName set in the VMX file
+	var displayName string
+	if v, ok := state.GetOk("display_name"); ok {
+		displayName = v.(string)
+	}
+	record, err := r.find("Name", displayName)
 	if err != nil {
 		return "", err
 	}
@@ -508,8 +515,8 @@ func (d *ESX5Driver) connect() error {
 			ssh.PasswordKeyboardInteractive(d.Password)),
 	}
 
-	if d.PrivateKey != "" {
-		signer, err := commonssh.FileSigner(d.PrivateKey)
+	if d.PrivateKeyFile != "" {
+		signer, err := helperssh.FileSigner(d.PrivateKeyFile)
 		if err != nil {
 			return err
 		}

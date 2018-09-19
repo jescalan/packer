@@ -137,6 +137,20 @@ builder.
     doesn't shut down in this time, it is an error. By default, the timeout is
     `5m` or five minutes.
 
+-   `linked` (boolean) - By default Packer creates a 'full' clone of
+    the virtual machine specified in `source_path`. The resultant virtual
+    machine is fully independant from the parent it was cloned from.
+
+    Setting `linked` to `true` instead causes Packer to create the virtual
+    machine as a 'linked' clone. Linked clones use and require ongoing
+    access to the disks of the parent virtual machine. The benefit of a
+    linked clone is that the clones virtual disk is typically very much
+    smaller than would be the case for a full clone. Additionally, the
+    cloned virtual machine can also be created much faster. Creating a
+    linked clone will typically only be of benefit in some advanced build
+    scenarios. Most users will wish to create a full clone instead.
+    Defaults to `false`.
+
 -   `skip_compaction` (boolean) - VMware-created disks are defragmented and
     compacted at the end of the build process using `vmware-vdiskmanager`. In
     certain rare cases, this might actually end up making the resulting disks
@@ -201,8 +215,20 @@ machine, simulating a human actually typing the keyboard.
 
 -&gt; Keystrokes are typed as separate key up/down events over VNC with a
 default 100ms delay. The delay alleviates issues with latency and CPU
-contention. For local builds you can tune this delay by specifying
-e.g. `PACKER_KEY_INTERVAL=10ms` to speed through the boot command.
+contention. You can tune this delay on a per-builder basis by specifying
+"boot_key_interval" in your Packer template, for example:
+
+```
+{
+  "builders": [
+    {
+      "type": "vmware-vmx",
+      "boot_key_interval": "10ms"
+      ...
+    }
+  ]
+}
+```
 
 <%= partial "partials/builders/boot-command" %>
 

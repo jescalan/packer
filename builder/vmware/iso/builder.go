@@ -139,12 +139,27 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 		b.config.DiskAdapterType = "lsilogic"
 	}
 
+	if !b.config.SkipCompaction {
+		if b.config.RemoteType == "esx5" {
+			if b.config.DiskTypeId == "" {
+				b.config.SkipCompaction = true
+			}
+		}
+	}
+
 	if b.config.DiskTypeId == "" {
 		// Default is growable virtual disk split in 2GB files.
 		b.config.DiskTypeId = "1"
 
 		if b.config.RemoteType == "esx5" {
 			b.config.DiskTypeId = "zeroedthick"
+		}
+	}
+
+	if b.config.RemoteType == "esx5" {
+		if b.config.DiskTypeId != "thin" && !b.config.SkipCompaction {
+			errs = packer.MultiErrorAppend(
+				errs, fmt.Errorf("skip_compaction must be 'true' for disk_type_id: %s", b.config.DiskTypeId))
 		}
 	}
 
@@ -212,11 +227,18 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 		}
 	}
 
-	if b.config.Format != "" {
-		if !(b.config.Format == "ova" || b.config.Format == "ovf" || b.config.Format == "vmx") {
-			errs = packer.MultiErrorAppend(errs,
-				fmt.Errorf("format must be one of ova, ovf, or vmx"))
-		}
+	if b.config.Format == "" {
+		b.config.Format = "ovf"
+	}
+
+	if !(b.config.Format == "ova" || b.config.Format == "ovf" || b.config.Format == "vmx") {
+		errs = packer.MultiErrorAppend(errs,
+			fmt.Errorf("format must be one of ova, ovf, or vmx"))
+	}
+
+	if b.config.RemoteType == "esx5" && b.config.SkipExport != true && b.config.RemotePassword == "" {
+		errs = packer.MultiErrorAppend(errs,
+			fmt.Errorf("exporting the vm (with ovftool) requires that you set a value for remote_password"))
 	}
 
 	// Warnings
@@ -256,7 +278,7 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 
 	exportOutputPath := b.config.OutputDir
 
-	if b.config.RemoteType != "" && b.config.Format != "" {
+	if b.config.RemoteType != "" {
 		b.config.OutputDir = b.config.VMName
 	}
 	dir.SetOutputDir(b.config.OutputDir)
@@ -332,11 +354,12 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			BootCommand: b.config.FlatBootCommand(),
 			VMName:      b.config.VMName,
 			Ctx:         b.config.ctx,
+			KeyInterval: b.config.VNCConfig.BootKeyInterval,
 		},
 		&communicator.StepConnect{
 			Config:    &b.config.SSHConfig.Comm,
 			Host:      driver.CommHost,
-			SSHConfig: vmwcommon.SSHConfigFunc(&b.config.SSHConfig),
+			SSHConfig: b.config.SSHConfig.Comm.SSHConfigFunc(),
 		},
 		&vmwcommon.StepUploadTools{
 			RemoteType:        b.config.RemoteType,
@@ -345,6 +368,9 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			Ctx:               b.config.ctx,
 		},
 		&common.StepProvision{},
+		&common.StepCleanupTempKeys{
+			Comm: &b.config.SSHConfig.Comm,
+		},
 		&vmwcommon.StepShutdown{
 			Command: b.config.ShutdownCommand,
 			Timeout: b.config.ShutdownTimeout,

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"regexp"
 
 	vmwcommon "github.com/hashicorp/packer/builder/vmware/common"
 	"github.com/hashicorp/packer/helper/multistep"
@@ -16,65 +17,8 @@ type StepCloneVMX struct {
 	OutputDir string
 	Path      string
 	VMName    string
+	Linked    bool
 }
-
-type vmxAdapter struct {
-	// The string portion of the address used in the vmx file
-	strAddr string
-	// Max address for adapter, controller, or controller channel
-	aAddrMax int
-	// Max address for device or channel supported by adapter
-	dAddrMax int
-}
-
-const (
-	// VMware Configuration Maximums - Virtual Hardware Versions 13/14
-	//
-	// Specifying the max numbers for the adapter/controller:bus/channel
-	// *address* as opposed to specifying the maximums as per the VMware
-	// documentation allows consistent (inclusive) treatment when looping
-	// over each adapter/controller type
-	//
-	// SCSI - Address range: scsi0:0 to scsi3:15
-	scsiAddrName       = "scsi" // String part of address used in the vmx file
-	maxSCSIAdapterAddr = 3      // Max 4 adapters
-	maxSCSIDeviceAddr  = 15     // Max 15 devices per adapter; ID 7 is the HBA
-	// SATA - Address range: sata0:0 to scsi3:29
-	sataAddrName       = "sata" // String part of address used in the vmx file
-	maxSATAAdapterAddr = 3      // Max 4 controllers
-	maxSATADeviceAddr  = 29     // Max 30 devices per controller
-	// NVMe - Address range: nvme0:0 to nvme3:14
-	nvmeAddrName       = "nvme" // String part of address used in the vmx file
-	maxNVMeAdapterAddr = 3      // Max 4 adapters
-	maxNVMeDeviceAddr  = 14     // Max 15 devices per adapter
-	// IDE - Address range: ide0:0 to ide1:1
-	ideAddrName       = "ide" // String part of address used in the vmx file
-	maxIDEAdapterAddr = 1     // One controller with primary/secondary channels
-	maxIDEDeviceAddr  = 1     // Each channel supports master and slave
-)
-
-var (
-	scsiAdapter = vmxAdapter{
-		strAddr:  scsiAddrName,
-		aAddrMax: maxSCSIAdapterAddr,
-		dAddrMax: maxSCSIDeviceAddr,
-	}
-	sataAdapter = vmxAdapter{
-		strAddr:  sataAddrName,
-		aAddrMax: maxSATAAdapterAddr,
-		dAddrMax: maxSATADeviceAddr,
-	}
-	nvmeAdapter = vmxAdapter{
-		strAddr:  nvmeAddrName,
-		aAddrMax: maxNVMeAdapterAddr,
-		dAddrMax: maxNVMeDeviceAddr,
-	}
-	ideAdapter = vmxAdapter{
-		strAddr:  ideAddrName,
-		aAddrMax: maxIDEAdapterAddr,
-		dAddrMax: maxIDEDeviceAddr,
-	}
-)
 
 func (s *StepCloneVMX) Run(_ context.Context, state multistep.StateBag) multistep.StepAction {
 	driver := state.Get("driver").(vmwcommon.Driver)
@@ -85,7 +29,7 @@ func (s *StepCloneVMX) Run(_ context.Context, state multistep.StateBag) multiste
 	ui.Say("Cloning source VM...")
 	log.Printf("Cloning from: %s", s.Path)
 	log.Printf("Cloning to: %s", vmxPath)
-	if err := driver.Clone(vmxPath, s.Path); err != nil {
+	if err := driver.Clone(vmxPath, s.Path, s.Linked); err != nil {
 		state.Put("error", err)
 		return multistep.ActionHalt
 	}
@@ -102,16 +46,30 @@ func (s *StepCloneVMX) Run(_ context.Context, state multistep.StateBag) multiste
 		return multistep.ActionHalt
 	}
 
-	// Search across all adapter types to get the filenames of attached disks
-	allDiskAdapters := []vmxAdapter{
-		scsiAdapter,
-		sataAdapter,
-		nvmeAdapter,
-		ideAdapter,
-	}
 	var diskFilenames []string
-	for _, adapter := range allDiskAdapters {
-		diskFilenames = append(diskFilenames, getAttachedDisks(adapter, vmxData)...)
+	// The VMX file stores the path to a configured disk, and information
+	// about that disks attachment to a virtual adapter/controller, as a
+	// key/value pair.
+	// For a virtual disk attached to bus ID 3 of the virtual machines
+	// first SCSI adapter the key/value pair would look something like:
+	// scsi0:3.fileName = "relative/path/to/scsiDisk.vmdk"
+	// The supported adapter types and configuration maximums for each type
+	// vary according to the VMware platform type and version, and the
+	// Virtual Machine Hardware version used. See the 'Virtual Machine
+	// Maximums' section within VMware's 'Configuration Maximums'
+	// documentation for each platform:
+	// https://kb.vmware.com/s/article/1003497
+	// Information about the supported Virtual Machine Hardware versions:
+	// https://kb.vmware.com/s/article/1003746
+	// The following regexp is used to match all possible disk attachment
+	// points that may be found in the VMX file across all VMware
+	// platforms/versions and Virtual Machine Hardware versions
+	diskPathKeyRe := regexp.MustCompile(`(?i)^(scsi|sata|ide|nvme)[[:digit:]]:[[:digit:]]{1,2}\.fileName`)
+	for k, v := range vmxData {
+		match := diskPathKeyRe.FindString(k)
+		if match != "" && filepath.Ext(v) == ".vmdk" {
+			diskFilenames = append(diskFilenames, v)
+		}
 	}
 
 	// Write out the relative, host filesystem paths to the disks
@@ -146,18 +104,4 @@ func (s *StepCloneVMX) Run(_ context.Context, state multistep.StateBag) multiste
 }
 
 func (s *StepCloneVMX) Cleanup(state multistep.StateBag) {
-}
-
-func getAttachedDisks(a vmxAdapter, data map[string]string) (attachedDisks []string) {
-	// Loop over possible adapter, controller or controller channel
-	for x := 0; x <= a.aAddrMax; x++ {
-		// Loop over possible addresses for attached devices
-		for y := 0; y <= a.dAddrMax; y++ {
-			address := fmt.Sprintf("%s%d:%d.filename", a.strAddr, x, y)
-			if device, _ := data[address]; filepath.Ext(device) == ".vmdk" {
-				attachedDisks = append(attachedDisks, device)
-			}
-		}
-	}
-	return
 }

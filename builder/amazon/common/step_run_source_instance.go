@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/ec2"
 
 	retry "github.com/hashicorp/packer/common"
+	"github.com/hashicorp/packer/helper/communicator"
 	"github.com/hashicorp/packer/helper/multistep"
 	"github.com/hashicorp/packer/packer"
 	"github.com/hashicorp/packer/template/interpolate"
@@ -21,9 +22,11 @@ type StepRunSourceInstance struct {
 	AssociatePublicIpAddress          bool
 	AvailabilityZone                  string
 	BlockDevices                      BlockDevices
+	Comm                              *communicator.Config
 	Ctx                               interpolate.Context
 	Debug                             bool
 	EbsOptimized                      bool
+	EnableT2Unlimited                 bool
 	ExpectedRootDevice                string
 	IamInstanceProfile                string
 	InstanceInitiatedShutdownBehavior string
@@ -41,10 +44,7 @@ type StepRunSourceInstance struct {
 
 func (s *StepRunSourceInstance) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	ec2conn := state.Get("ec2").(*ec2.EC2)
-	var keyName string
-	if name, ok := state.GetOk("keyPair"); ok {
-		keyName = name.(string)
-	}
+
 	securityGroupIds := aws.StringSlice(state.Get("securityGroupIds").([]string))
 	ui := state.Get("ui").(packer.Ui)
 
@@ -116,6 +116,11 @@ func (s *StepRunSourceInstance) Run(ctx context.Context, state multistep.StateBa
 		EbsOptimized:        &s.EbsOptimized,
 	}
 
+	if s.EnableT2Unlimited {
+		creditOption := "unlimited"
+		runOpts.CreditSpecification = &ec2.CreditSpecificationRequest{CpuCredits: &creditOption}
+	}
+
 	// Collect tags for tagging on resource creation
 	var tagSpecs []*ec2.TagSpecification
 
@@ -144,8 +149,8 @@ func (s *StepRunSourceInstance) Run(ctx context.Context, state multistep.StateBa
 		volTags.Report(ui)
 	}
 
-	if keyName != "" {
-		runOpts.KeyName = &keyName
+	if s.Comm.SSHKeyPairName != "" {
+		runOpts.KeyName = &s.Comm.SSHKeyPairName
 	}
 
 	if s.SubnetId != "" && s.AssociatePublicIpAddress {
@@ -297,14 +302,8 @@ func (s *StepRunSourceInstance) Cleanup(state multistep.StateBag) {
 			ui.Error(fmt.Sprintf("Error terminating instance, may still be around: %s", err))
 			return
 		}
-		stateChange := StateChangeConf{
-			Pending: []string{"pending", "running", "shutting-down", "stopped", "stopping"},
-			Refresh: InstanceStateRefreshFunc(ec2conn, s.instanceId),
-			Target:  "terminated",
-		}
 
-		_, err := WaitForState(&stateChange)
-		if err != nil {
+		if err := WaitUntilInstanceTerminated(aws.BackgroundContext(), ec2conn, s.instanceId); err != nil {
 			ui.Error(err.Error())
 		}
 	}

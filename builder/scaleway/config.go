@@ -29,6 +29,7 @@ type Config struct {
 	SnapshotName string `mapstructure:"snapshot_name"`
 	ImageName    string `mapstructure:"image_name"`
 	ServerName   string `mapstructure:"server_name"`
+	Bootscript   string `mapstructure:"bootscript"`
 
 	UserAgent string
 	ctx       interpolate.Context
@@ -118,6 +119,6 @@ func NewConfig(raws ...interface{}) (*Config, []string, error) {
 		return nil, nil, errs
 	}
 
-	common.ScrubConfig(c, c.Token)
+	packer.LogSecretFilter.Set(c.Token)
 	return c, nil, nil
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/ec2"
 
 	retry "github.com/hashicorp/packer/common"
+	"github.com/hashicorp/packer/helper/communicator"
 	"github.com/hashicorp/packer/helper/multistep"
 	"github.com/hashicorp/packer/packer"
 	"github.com/hashicorp/packer/template/interpolate"
@@ -23,7 +24,9 @@ type StepRunSpotInstance struct {
 	AssociatePublicIpAddress          bool
 	AvailabilityZone                  string
 	BlockDevices                      BlockDevices
+	BlockDurationMinutes              int64
 	Debug                             bool
+	Comm                              *communicator.Config
 	EbsOptimized                      bool
 	ExpectedRootDevice                string
 	IamInstanceProfile                string
@@ -32,6 +35,7 @@ type StepRunSpotInstance struct {
 	SourceAMI                         string
 	SpotPrice                         string
 	SpotPriceProduct                  string
+	SpotTags                          TagMap
 	SubnetId                          string
 	Tags                              TagMap
 	VolumeTags                        TagMap
@@ -45,10 +49,6 @@ type StepRunSpotInstance struct {
 
 func (s *StepRunSpotInstance) Run(ctx context.Context, state multistep.StateBag) multistep.StepAction {
 	ec2conn := state.Get("ec2").(*ec2.EC2)
-	var keyName string
-	if name, ok := state.GetOk("keyPair"); ok {
-		keyName = name.(string)
-	}
 	securityGroupIds := aws.StringSlice(state.Get("securityGroupIds").([]string))
 	ui := state.Get("ui").(packer.Ui)
 
@@ -183,14 +183,18 @@ func (s *StepRunSpotInstance) Run(ctx context.Context, state multistep.StateBag)
 		runOpts.SecurityGroupIds = securityGroupIds
 	}
 
-	if keyName != "" {
-		runOpts.KeyName = &keyName
+	if s.Comm.SSHKeyPairName != "" {
+		runOpts.KeyName = &s.Comm.SSHKeyPairName
+	}
+	spotInstanceInput := &ec2.RequestSpotInstancesInput{
+		LaunchSpecification: runOpts,
+		SpotPrice:           &spotPrice,
+	}
+	if s.BlockDurationMinutes != 0 {
+		spotInstanceInput.BlockDurationMinutes = &s.BlockDurationMinutes
 	}
 
-	runSpotResp, err := ec2conn.RequestSpotInstances(&ec2.RequestSpotInstancesInput{
-		SpotPrice:           &spotPrice,
-		LaunchSpecification: runOpts,
-	})
+	runSpotResp, err := ec2conn.RequestSpotInstances(spotInstanceInput)
 	if err != nil {
 		err := fmt.Errorf("Error launching source spot instance: %s", err)
 		state.Put("error", err)
@@ -202,13 +206,7 @@ func (s *StepRunSpotInstance) Run(ctx context.Context, state multistep.StateBag)
 
 	spotRequestId := s.spotRequest.SpotInstanceRequestId
 	ui.Message(fmt.Sprintf("Waiting for spot request (%s) to become active...", *spotRequestId))
-	stateChange := StateChangeConf{
-		Pending:   []string{"open"},
-		Target:    "active",
-		Refresh:   SpotRequestStateRefreshFunc(ec2conn, *spotRequestId),
-		StepState: state,
-	}
-	_, err = WaitForState(&stateChange)
+	err = WaitUntilSpotRequestFulfilled(ctx, ec2conn, *spotRequestId)
 	if err != nil {
 		err := fmt.Errorf("Error waiting for spot request (%s) to become ready: %s", *spotRequestId, err)
 		state.Put("error", err)
@@ -226,6 +224,33 @@ func (s *StepRunSpotInstance) Run(ctx context.Context, state multistep.StateBag)
 		return multistep.ActionHalt
 	}
 	instanceId = *spotResp.SpotInstanceRequests[0].InstanceId
+
+	// Tag spot instance request
+	spotTags, err := s.SpotTags.EC2Tags(s.Ctx, *ec2conn.Config.Region, state)
+	if err != nil {
+		err := fmt.Errorf("Error tagging spot request: %s", err)
+		state.Put("error", err)
+		ui.Error(err.Error())
+		return multistep.ActionHalt
+	}
+	spotTags.Report(ui)
+
+	if len(spotTags) > 0 && s.SpotTags.IsSet() {
+		// Retry creating tags for about 2.5 minutes
+		err = retry.Retry(0.2, 30, 11, func(_ uint) (bool, error) {
+			_, err := ec2conn.CreateTags(&ec2.CreateTagsInput{
+				Tags:      spotTags,
+				Resources: []*string{spotRequestId},
+			})
+			return true, err
+		})
+		if err != nil {
+			err := fmt.Errorf("Error tagging spot request: %s", err)
+			state.Put("error", err)
+			ui.Error(err.Error())
+			return multistep.ActionHalt
+		}
+	}
 
 	// Set the instance ID so that the cleanup works properly
 	s.instanceId = instanceId
@@ -344,13 +369,8 @@ func (s *StepRunSpotInstance) Cleanup(state multistep.StateBag) {
 			ui.Error(fmt.Sprintf("Error cancelling the spot request, may still be around: %s", err))
 			return
 		}
-		stateChange := StateChangeConf{
-			Pending: []string{"active", "open"},
-			Refresh: SpotRequestStateRefreshFunc(ec2conn, *s.spotRequest.SpotInstanceRequestId),
-			Target:  "cancelled",
-		}
 
-		_, err := WaitForState(&stateChange)
+		err := WaitUntilSpotRequestFulfilled(aws.BackgroundContext(), ec2conn, *s.spotRequest.SpotInstanceRequestId)
 		if err != nil {
 			ui.Error(err.Error())
 		}
@@ -364,14 +384,8 @@ func (s *StepRunSpotInstance) Cleanup(state multistep.StateBag) {
 			ui.Error(fmt.Sprintf("Error terminating instance, may still be around: %s", err))
 			return
 		}
-		stateChange := StateChangeConf{
-			Pending: []string{"pending", "running", "shutting-down", "stopped", "stopping"},
-			Refresh: InstanceStateRefreshFunc(ec2conn, s.instanceId),
-			Target:  "terminated",
-		}
 
-		_, err := WaitForState(&stateChange)
-		if err != nil {
+		if err := WaitUntilInstanceTerminated(aws.BackgroundContext(), ec2conn, s.instanceId); err != nil {
 			ui.Error(err.Error())
 		}
 	}

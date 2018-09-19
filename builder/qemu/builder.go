@@ -99,6 +99,7 @@ type Config struct {
 	Format            string     `mapstructure:"format"`
 	Headless          bool       `mapstructure:"headless"`
 	DiskImage         bool       `mapstructure:"disk_image"`
+	UseBackingFile    bool       `mapstructure:"use_backing_file"`
 	MachineType       string     `mapstructure:"machine_type"`
 	NetDevice         string     `mapstructure:"net_device"`
 	OutputDir         string     `mapstructure:"output_directory"`
@@ -255,6 +256,11 @@ func (b *Builder) Prepare(raws ...interface{}) ([]string, error) {
 		b.config.DiskCompression = false
 	}
 
+	if b.config.UseBackingFile && !(b.config.DiskImage && b.config.Format == "qcow2") {
+		errs = packer.MultiErrorAppend(
+			errs, errors.New("use_backing_file can only be enabled for QCOW2 images and when disk_image is true"))
+	}
+
 	if _, ok := accels[b.config.Accelerator]; !ok {
 		errs = packer.MultiErrorAppend(
 			errs, errors.New("invalid accelerator, only 'kvm', 'tcg', 'xen', 'hax', 'hvf', or 'none' are allowed"))
@@ -387,7 +393,7 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 			&communicator.StepConnect{
 				Config:    &b.config.Comm,
 				Host:      commHost,
-				SSHConfig: sshConfig,
+				SSHConfig: b.config.Comm.SSHConfigFunc(),
 				SSHPort:   commPort,
 				WinRMPort: commPort,
 			},
@@ -396,6 +402,12 @@ func (b *Builder) Run(ui packer.Ui, hook packer.Hook, cache packer.Cache) (packe
 
 	steps = append(steps,
 		new(common.StepProvision),
+	)
+
+	steps = append(steps,
+		&common.StepCleanupTempKeys{
+			Comm: &b.config.Comm,
+		},
 	)
 	steps = append(steps,
 		new(stepShutdown),

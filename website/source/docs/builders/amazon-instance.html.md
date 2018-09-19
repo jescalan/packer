@@ -109,9 +109,6 @@ builder.
 
     -   `encrypted` (boolean) - Indicates whether to encrypt the volume or not
 
-    -   `kms_key_id` (string) - The ARN for the KMS encryption key. When
-        specifying `kms_key_id`, `encrypted` needs to be set to `true`.
-
     -   `iops` (number) - The number of I/O operations per second (IOPS) that the
         volume supports. See the documentation on
         [IOPs](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_EbsBlockDevice.html)
@@ -167,6 +164,11 @@ builder.
 -   `availability_zone` (string) - Destination availability zone to launch
     instance in. Leave this empty to allow Amazon to auto-assign.
 
+-   `block_duration_minutes` (int64) - Requires `spot_price` to
+    be set. The required duration for the Spot Instances (also known as Spot blocks).
+    This value must be a multiple of 60 (60, 120, 180, 240, 300, or 360).
+    You can't specify an Availability Zone group or a launch group if you specify a duration.
+
 -   `bundle_destination` (string) - The directory on the running instance where
     the bundled AMI will be saved prior to uploading. By default this is `/tmp`.
     This directory must exist and be writable.
@@ -187,6 +189,11 @@ builder.
     provider whose API is compatible with aws EC2. Specify another endpoint
     like this `https://ec2.custom.endpoint.com`.
 
+-   `decode_authorization_messages` (boolean) - Enable automatic decoding of any
+    encoded authorization (error) messages using the `sts:DecodeAuthorizationMessage` API.
+    Note: requires that the effective user/role have permissions to `sts:DecodeAuthorizationMessage`
+    on resource `*`. Default `false`.
+
 -   `ebs_optimized` (boolean) - Mark instance as [EBS
     Optimized](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/EBSOptimized.html).
     Default `false`.
@@ -195,6 +202,30 @@ builder.
     on HVM-compatible AMIs. If true, add `ec2:ModifyInstanceAttribute` to your AWS IAM policy.
     Note: you must make sure enhanced networking is enabled on your instance. See [Amazon's
     documentation on enabling enhanced networking](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/enhanced-networking.html#enabling_enhanced_networking). Default `false`.
+
+-   `enable_t2_unlimited` (boolean) - Enabling T2 Unlimited allows the source
+    instance to burst additional CPU beyond its available [CPU Credits]
+    (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/t2-credits-baseline-concepts.html)
+    for as long as the demand exists.
+    This is in contrast to the standard configuration that only allows an
+    instance to consume up to its available CPU Credits.
+    See the AWS documentation for [T2 Unlimited]
+    (https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/t2-unlimited.html)
+    and the 'T2 Unlimited Pricing' section of the [Amazon EC2 On-Demand
+    Pricing](https://aws.amazon.com/ec2/pricing/on-demand/) document for more
+    information.
+    By default this option is disabled and Packer will set up a [T2
+    Standard](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/t2-std.html)
+    instance instead.
+
+    To use T2 Unlimited you must use a T2 instance type e.g. t2.micro.
+    Additionally, T2 Unlimited cannot be used in conjunction with Spot
+    Instances e.g. when the `spot_price` option has been configured.
+    Attempting to do so will cause an error.
+
+    !&gt; **Warning!** Additional costs may be incurred by enabling T2
+    Unlimited - even for instances that would usually qualify for the
+    [AWS Free Tier](https://aws.amazon.com/free/).
 
 -   `force_deregister` (boolean) - Force Packer to first deregister an existing
     AMI if one with the same name already exists. Defaults to `false`.
@@ -290,8 +321,11 @@ builder.
         Any filter described in the docs for [DescribeImages](http://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeImages.html)
         is valid.
 
-    -   `owners` (array of strings) - This scopes the AMIs to certain Amazon account IDs.
-        This is helpful to limit the AMIs to a trusted third party, or to your own account.
+    -   `owners` (array of strings) - Filters the images by their owner. You may
+        specify one or more AWS account IDs, "self" (which will use the account
+        whose credentials you are using to run Packer), or an AWS owner alias:
+        for example, "amazon", "aws-marketplace", or "microsoft".
+        This option is required for security reasons.
 
     -   `most_recent` (boolean) - Selects the newest created image when true.
         This is most useful for selecting a daily distro build.
@@ -317,6 +351,10 @@ builder.
     to `auto`. This tells Packer what sort of AMI you're launching to find the
     best spot price. This must be one of: `Linux/UNIX`, `SUSE Linux`, `Windows`,
     `Linux/UNIX (Amazon VPC)`, `SUSE Linux (Amazon VPC)`, `Windows (Amazon VPC)`
+
+-   `spot_tags` (object of key/value strings) - Requires `spot_price` to
+    be set. This tells Packer to apply tags to the spot request that is
+    issued.
 
 -   `sriov_support` (boolean) - Enable enhanced networking (SriovNetSupport but not ENA)
     on HVM-compatible AMIs. If true, add `ec2:ModifyInstanceAttribute` to your AWS IAM

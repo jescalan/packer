@@ -121,6 +121,11 @@ each category, the available configuration keys are alphabetized.
     provider whose API is compatible with aws EC2. Specify another endpoint
     like this `https://ec2.custom.endpoint.com`.
 
+-   `decode_authorization_messages` (boolean) - Enable automatic decoding of any
+    encoded authorization (error) messages using the `sts:DecodeAuthorizationMessage` API.
+    Note: requires that the effective user/role have permissions to `sts:DecodeAuthorizationMessage`
+    on resource `*`. Default `false`.
+
 -   `device_path` (string) - The path to the device where the root volume of the
     source AMI will be attached. This defaults to "" (empty string), which
     forces Packer to find an open device automatically.
@@ -213,8 +218,10 @@ each category, the available configuration keys are alphabetized.
     where the `.Device` variable is replaced with the name of the device where
     the volume is attached.
 
--   `mount_partition` (number) - The partition number containing the
-    / partition. By default this is the first partition of the volume.
+-   `mount_partition` (string) - The partition number containing the
+    / partition. By default this is the first partition of the volume, (for
+    example, `xvda1`) but you can designate the entire block device by setting
+    `"mount_partition": "0"` in your config, which will mount `xvda` instead.
 
 -   `mount_options` (array of strings) - Options to supply the `mount` command
     when mounting devices. Each option will be prefixed with `-o` and supplied
@@ -222,6 +229,14 @@ each category, the available configuration keys are alphabetized.
     shell, user discretion is advised. See [this manual page for the mount
     command](http://linuxcommand.org/man_pages/mount8.html) for valid file
     system specific options
+
+-   `nvme_device_path` (string) - When we call the mount command (by default
+    `mount -o device dir`), the string provided in `nvme_mount_path` will
+    replace `device` in that command. When this option is not set, `device` in
+    that command will be something like `/dev/sdf1`, mirroring the attached
+    device name. This assumption works for most instances but will fail with c5
+    and m5 instances. In order to use the chroot builder with c5 and m5
+    instances, you must manually set `nvme_device_path` and `device_path`.
 
 -   `pre_mount_commands` (array of strings) - A series of commands to execute
     after attaching the root volume and before mounting the chroot. This is not
@@ -243,6 +258,16 @@ each category, the available configuration keys are alphabetized.
     chroot environment and the resulting AMI. Default size is the snapshot size
     of the `source_ami` unless `from_scratch` is `true`, in which case
     this field must be defined.
+
+-   `root_volume_type` (string) - The type of EBS volume for the chroot environment
+     and resulting AMI. The default value is the type of the `source_ami`, unless
+    `from_scratch` is true, in which case the default value is `gp2`. You can only
+     specify `io1` if building based on top of a `source_ami` which is also `io1`.
+
+-   `root_volume_tags` (object of key/value strings) - Tags to apply to the volumes
+    that are *launched*. This is a
+    [template engine](/docs/templates/engine.html),
+    see [Build template data](#build-template-data) for more information.
 
 -   `skip_region_validation` (boolean) - Set to true if you want to skip
     validation of the `ami_regions` configuration option. Default `false`.
@@ -284,16 +309,19 @@ each category, the available configuration keys are alphabetized.
         Any filter described in the docs for [DescribeImages](http://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeImages.html)
         is valid.
 
-    -   `owners` (array of strings) - This scopes the AMIs to certain Amazon account IDs.
-        This is helpful to limit the AMIs to a trusted third party, or to your own account.
+    -   `owners` (array of strings) - Filters the images by their owner. You may
+        specify one or more AWS account IDs, "self" (which will use the account
+        whose credentials you are using to run Packer), or an AWS owner alias:
+        for example, "amazon", "aws-marketplace", or "microsoft".
+        This option is required for security reasons.
 
     -   `most_recent` (boolean) - Selects the newest created image when true.
         This is most useful for selecting a daily distro build.
 
     You may set this in place of `source_ami` or in conjunction with it. If you
-    set this in conjunction with `source_ami`, the `source_ami` will be added to 
+    set this in conjunction with `source_ami`, the `source_ami` will be added to
     the filter. The provided `source_ami` must meet all of the filtering criteria
-    provided in `source_ami_filter`; this pins the AMI returned by the filter, 
+    provided in `source_ami_filter`; this pins the AMI returned by the filter,
     but will cause Packer to fail if the `source_ami` does not exist.
 
 -   `sriov_support` (boolean) - Enable enhanced networking (SriovNetSupport but not ENA)
@@ -368,6 +396,7 @@ its internals such as finding an available device.
 
 ## Gotchas
 
+### Unmounting the Filesystem
 One of the difficulties with using the chroot builder is that your provisioning
 scripts must not leave any processes running or packer will be unable to unmount
 the filesystem.
@@ -396,6 +425,53 @@ services:
   ]
 }
 ```
+
+### Using Instances with NVMe block devices.
+In C5, C5d, M5, and i3.metal instances, EBS volumes are exposed as NVMe block
+devices [reference](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/nvme-ebs-volumes.html).
+In order to correctly mount these devices, you have to do some extra legwork,
+involving the `nvme_device_path` option above. Read that for more information.
+
+A working example for mounting an NVMe device is below:
+
+```
+{
+  "variables": {
+    "region" : "us-east-2"
+  },
+  "builders": [
+    {
+      "type": "amazon-chroot",
+      "region": "{{user `region`}}",
+      "source_ami_filter": {
+        "filters": {
+        "virtualization-type": "hvm",
+        "name": "amzn-ami-hvm-*",
+        "root-device-type": "ebs"
+        },
+        "owners": ["137112412989"],
+        "most_recent": true
+      },
+      "ena_support": true,
+      "ami_name": "amazon-chroot-test-{{timestamp}}",
+      "nvme_device_path": "/dev/nvme1n1p",
+      "device_path": "/dev/sdf"
+    }
+  ],
+
+  "provisioners": [
+    {
+      "type": "shell",
+      "inline": ["echo Test > /tmp/test.txt"]
+    }
+  ]
+}
+```
+
+Note that in the `nvme_device_path` you must end with the `p`; if you try to
+define the partition in this path (e.g. "nvme_device_path": `/dev/nvme1n1p1`)
+and haven't also set the `"mount_partition": 0`, a `1` will be appended to the
+`nvme_device_path` and Packer will fail.
 
 ## Building From Scratch
 

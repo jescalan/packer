@@ -73,9 +73,8 @@ builder.
     for the droplet being created. This defaults to `false`, or not enabled.
 
 -   `snapshot_name` (string) - The name of the resulting snapshot that will
-    appear in your account. This must be unique. To help make this unique, use a
-    function like `timestamp` (see [configuration
-    templates](/docs/templates/engine.html) for more info)
+    appear in your account. Defaults to "packer-{{timestamp}}" (see
+    [configuration templates](/docs/templates/engine.html) for more info).
 
 -   `snapshot_regions` (array of strings) - The regions of the resulting snapshot that will
     appear in your account.
@@ -89,6 +88,8 @@ builder.
 -   `user_data_file` (string) - Path to a file that will be used for the user
     data when launching the Droplet.
 
+-   `tags` (list) - Tags to apply to the droplet when it is created
+
 ## Basic Example
 
 Here is a basic example. It is completely valid as soon as you enter your own
@@ -98,7 +99,7 @@ access tokens:
 {
   "type": "digitalocean",
   "api_token": "YOUR API KEY",
-  "image": "ubuntu-14-04-x64",
+  "image": "ubuntu-16-04-x64",
   "region": "nyc3",
   "size": "512mb",
   "ssh_username": "root"

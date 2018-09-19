@@ -30,7 +30,6 @@ builder.
 -   `client_secret` (string) The password or secret for your service principal.
 
 -   `subscription_id` (string) Subscription under which the build will be performed. **The service principal specified in `client_id` must have full access to this subscription, unless build_resource_group_name option is specified in which case it needs to have owner access to the existing resource group specified in build_resource_group_name parameter.**
--   `capture_container_name` (string) Destination container name. Essentially the "directory" where your VHD will be organized in Azure.  The captured VHD's URL will be `https://<storage_account>.blob.core.windows.net/system/Microsoft.Compute/Images/<capture_container_name>/<capture_name_prefix>.xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx.vhd`.
 
 -   `image_publisher` (string) PublisherName for your base image. See [documentation](https://azure.microsoft.com/en-us/documentation/articles/resource-groups-vm-searching/) for details.
 
@@ -141,11 +140,6 @@ Providing `temp_resource_group_name` or `location` in combination with `build_re
     account type for a managed image.  Valid values are Standard_LRS
     and Premium\_LRS.  The default is Standard\_LRS.
 
--   `object_id` (string) Specify an OAuth Object ID to protect WinRM certificates
-    created at runtime. This variable is required when creating images based on
-    Windows; this variable is not used by non-Windows builds. See `Windows`
-    behavior for `os_type`, below.
-
 -   `os_disk_size_gb` (number) Specify the size of the OS disk in GB (gigabytes).  Values of zero or less than zero are
     ignored.
 
@@ -221,6 +215,9 @@ Providing `temp_resource_group_name` or `location` in combination with `build_re
 
     CLI example `azure vm sizes -l westus`
 
+-   `async_resourcegroup_delete` (boolean) If you want packer to delete the temporary resource group asynchronously set this value. It's a boolean value
+     and defaults to false. **Important** Setting this true means that your builds are faster, however any failed deletes are not reported.
+
 ## Basic Example
 
 Here is a basic example for Azure.
@@ -261,23 +258,7 @@ Please refer to the Azure [examples](https://github.com/hashicorp/packer/tree/ma
 
 ### Windows
 
-The following provisioner snippet shows how to sysprep a Windows VM. Deprovision should be the last operation executed by a build.
-
-``` json
-{
-  "provisioners": [
-    {
-      "type": "powershell",
-      "inline": [
-        "if( Test-Path $Env:SystemRoot\\windows\\system32\\Sysprep\\unattend.xml ){ rm $Env:SystemRoot\\windows\\system32\\Sysprep\\unattend.xml -Force}",
-        "& $Env:SystemRoot\\System32\\Sysprep\\Sysprep.exe /oobe /generalize /shutdown /quiet"
-      ]
-    }
-  ]
-}
-```
-
-In some circumstances the above isn't enough to reliably know that the sysprep is actually finished generalizing the image, the code below will wait for sysprep to write the image status in the registry and will exit after that. The possible states, in case you want to wait for another state, [are documented here](https://technet.microsoft.com/en-us/library/hh824815.aspx)
+The following provisioner snippet shows how to sysprep a Windows VM. Deprovision should be the last operation executed by a build. The code below will wait for sysprep to write the image status in the registry and will exit after that. The possible states, in case you want to wait for another state, [are documented here](https://technet.microsoft.com/en-us/library/hh824815.aspx)
 
 ``` json
 {
@@ -291,8 +272,6 @@ In some circumstances the above isn't enough to reliably know that the sysprep i
     }
   ]
 }
-
-
 ```
 
 ### Linux
@@ -410,8 +389,6 @@ A Windows build requires two templates and two deployments. Unfortunately, the K
 the same time hence the need for two templates and deployments. The time required to deploy a KeyVault template is
 minimal, so overall impact is small.
 
-> The KeyVault certificate is protected using the object\_id of the SPN. This is why Windows builds require object\_id,
-> and an SPN. The KeyVault is deleted when the resource group is deleted.
 
 See the [examples/azure](https://github.com/hashicorp/packer/tree/master/examples/azure) folder in the packer project
 for more examples.
